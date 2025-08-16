@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CLASIFICADOR REMASEP</title>
+
+<!-- Librerías para leer CSV y Excel -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  :root{
+    --bg:#0f172a; --card:#111827; --ink:#e5e7eb; --muted:#94a3b8; --accent:#22c55e; --border:#1f2937;
+  }
+  body{background:var(--bg); color:var(--ink); font-family:system-ui,Segoe UI,Inter,Roboto,Arial,sans-serif; margin:0}
+  .wrap{max-width:1100px; margin:24px auto; padding:0 16px}
+  h1{margin:0 0 14px; font-size:clamp(20px,3vw,28px)}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:12px}
+  .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+  .row.space{justify-content:space-between}
+  button{background:var(--accent); color:#052e16; border:none; padding:9px 14px; border-radius:10px; font-weight:800; cursor:pointer}
+  button.secondary{background:#1f2937; color:var(--ink); border:1px solid #374151}
+  button.warn{background:#ef4444; color:white}
+  button:disabled{opacity:.55; cursor:not-allowed}
+  input[type=file]{color:var(--ink)}
+  .hint{color:var(--muted); font-size:13px}
+  .kbd{font-family:ui-monospace,Menlo,Consolas,monospace; background:#0b1220; border:1px solid var(--border); border-radius:6px; padding:1px 6px}
+  textarea{width:100%; min-height:110px; background:#0b1220; color:var(--ink); border:1px solid var(--border); border-radius:10px; padding:10px}
+  table{width:100%; border-collapse:collapse; margin-top:8px; font-variant-numeric:tabular-nums}
+  th,td{border-bottom:1px solid var(--border); padding:8px; text-align:center}
+  th{background:#0b1220; position:sticky; top:0}
+  .left{text-align:left}
+  .tot{font-weight:800}
+  #downloadWrap{margin-top:16px; display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🧮 CLASIFICADOR REMASEP</h1>
+
+  <div class="card">
+    <div class="row space" style="align-items:baseline">
+      <strong>PEGA LA INFORMACIÓN A CLASIFICAR</strong>
+      <div class="row">
+        <button id="btnClassify" disabled>Clasificar</button>
+        <button id="btnClearPaste" class="warn">Borrar</button>
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+      </div>
+    </div>
+    <textarea id="pasteArea" placeholder="Pega aquí CSV con encabezados (Nombre,Sexo,Edad,Embarazada,Migrante,Cantidad)."></textarea>
+  </div>
+
+  <div id="tableCard" class="card" style="display:none">
+    <div class="row space" style="align-items:baseline">
+      <strong>Resultado</strong>
+      <div class="hint" id="meta"></div>
+    </div>
+    <div id="tableWrap"></div>
+    <div id="downloadWrap">
+      <button id="btnDownload" class="secondary">Descargar Excel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const fileInput = document.getElementById('fileInput');
+  const pasteArea = document.getElementById('pasteArea');
+  const btnClassify = document.getElementById('btnClassify');
+  const btnClearPaste = document.getElementById('btnClearPaste');
+  const tableCard = document.getElementById('tableCard');
+  const tableWrap = document.getElementById('tableWrap');
+  const meta = document.getElementById('meta');
+  const btnDownload = document.getElementById('btnDownload');
+  const downloadWrap = document.getElementById('downloadWrap');
+
+  let lastTable = [];
+
+  const RANGOS = [
+    { nombre:"Menos de 1 año - 1 año", min:0, max:1 },
+    { nombre:"2 años", min:2, max:2 },
+    { nombre:"3 años", min:3, max:3 },
+    { nombre:"4 años", min:4, max:4 },
+    { nombre:"5 años", min:5, max:5 },
+    { nombre:"6 años", min:6, max:6 },
+    { nombre:"7 años", min:7, max:7 },
+    { nombre:"8-9 años", min:8, max:9 },
+    { nombre:"10-14 años", min:10, max:14 },
+    { nombre:"15-19 años", min:15, max:19 },
+    { nombre:"20-24 años", min:20, max:24 },
+    { nombre:"25-34 años", min:25, max:34 },
+    { nombre:"35-44 años", min:35, max:44 },
+    { nombre:"45-59 años", min:45, max:59 },
+    { nombre:"60-64 años", min:60, max:64 },
+    { nombre:"65-74 años", min:65, max:74 },
+    { nombre:"75 y más años", min:75, max:200 }
+  ];
+
+  const stripAccents = s => String(s??'').normalize('NFD').replace(/\p{Diacritic}/gu,'');
+  const norm = s => stripAccents(String(s??'').trim().toLowerCase());
+  const toNum = v => {
+    if (v===null || v===undefined || v==='') return NaN;
+    const n = Number(String(v).replace(/[^\d.-]/g,''));
+    return isNaN(n) ? NaN : n;
+  };
+  const yes = v => {
+    const x = stripAccents(String(v??'').trim().toUpperCase());
+    return x==='SI' || x==='S';
+  };
+  const isMale = v => ["hombre","masculino","male","m"].includes(norm(v));
+  const isFemale = v => ["mujer","femenino","female","f"].includes(norm(v));
+  const findRange = edad => RANGOS.find(r => edad>=r.min && edad<=r.max)?.nombre || null;
+
+  function enableClassify(){
+    btnClassify.disabled = !(fileInput.files.length || pasteArea.value.trim());
+  }
+  fileInput.addEventListener('change', enableClassify);
+  pasteArea.addEventListener('input', enableClassify);
+
+  btnClearPaste.addEventListener('click', ()=>{
+    pasteArea.value = "";
+    tableCard.style.display = 'none';
+    tableWrap.innerHTML = "";
+    downloadWrap.style.display = 'none';
+    meta.textContent = "";
+    fileInput.value = "";
+    enableClassify();
+  });
+
+  btnClassify.addEventListener('click', async ()=>{
+    let rows = [];
+    if (fileInput.files.length){
+      const f = fileInput.files[0];
+      const ext = f.name.split('.').pop().toLowerCase();
+      meta.textContent = `Fuente: ${f.name}`;
+      if (ext==='csv'){
+        await new Promise((resolve,reject)=>{
+          Papa.parse(f, {header:true, skipEmptyLines:true,
+            complete: res=>{ rows = res.data; resolve(); }, error:reject});
+        });
+      } else {
+        const buf = await f.arrayBuffer();
+        const wb = XLSX.read(buf, {type:'array'});
+        rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {defval:''});
+      }
+    } else {
+      const res = Papa.parse(pasteArea.value.trim(), {header:true, skipEmptyLines:true});
+      rows = res.data;
+      meta.textContent = `Fuente: Pegado manual (${rows.length} filas)`;
+    }
+
+    rows = rows.map(r=>{
+      const o={};
+      for (const [k,v] of Object.entries(r)){
+        const key = norm(k).replace('género','genero');
+        o[key] = v;
+      }
+      if ('sexo' in o && !('genero' in o)) o.genero = o.sexo;
+      return o;
+    });
+
+    const getCol = (...cands) => cands.find(c => c in (rows[0]||{}));
+    const cGenero = getCol('genero','sexo','sex','género') || 'genero';
+    const cEdad   = getCol('edad','age') || 'edad';
+    const cEmbar  = getCol('embarazada','embarazo','gestante') || 'embarazada';
+    const cMigr   = getCol('migrante','migracion') || 'migrante';
+    const cCant   = getCol('cantidad','cant','n','numero','count') || 'cantidad';
+
+    const tabla = {};
+    let excluidosSinEdad = 0;
+
+    for (const r of rows){
+      const genero = r[cGenero];
+      const edad = toNum(r[cEdad]);
+      const embar = yes(r[cEmbar]);
+      const migr  = yes(r[cMigr]);
+      const cant  = Math.max(1, Math.floor(toNum(r[cCant]) || 1));
+
+      if (Number.isNaN(edad)){ excluidosSinEdad += cant; continue; }
+
+      const rango = findRange(edad);
+      if (!rango) continue;
+      if (!tabla[rango]) tabla[rango] = {Hombres:0, Mujeres:0, Embarazadas:0, Migrantes:0};
+
+      if (isMale(genero))  tabla[rango].Hombres += cant;
+      if (isFemale(genero))tabla[rango].Mujeres += cant;
+      if (embar)           tabla[rango].Embarazadas += cant;
+      if (migr)            tabla[rango].Migrantes  += cant;
+    }
+
+    let out = RANGOS.map(r => ({Rango:r.nombre, ...(tabla[r.nombre]||{Hombres:0,Mujeres:0,Embarazadas:0,Migrantes:0})}))
+                    .filter(x => (x.Hombres + x.Mujeres) > 0);
+
+    const sum = out.reduce((a,c)=>({
+      Hombres:a.Hombres+c.Hombres,
+      Mujeres:a.Mujeres+c.Mujeres,
+      Embarazadas:a.Embarazadas+c.Embarazadas,
+      Migrantes:a.Migrantes+c.Migrantes
+    }), {Hombres:0,Mujeres:0,Embarazadas:0,Migrantes:0});
+
+    out.push({Rango:'Total', ...sum});
+    out.push({Rango:'Total Personas', Hombres: sum.Hombres + sum.Mujeres, Mujeres:'', Embarazadas:'', Migrantes:''});
+    lastTable = out;
+
+    tableCard.style.display = 'block';
+    render(out);
+    downloadWrap.style.display = 'block';
+    meta.textContent += ` • Excluidos sin edad: ${excluidosSinEdad}`;
+  });
+
+  function render(rows){
+    let html = `<table id="tablaClasificacion">
+      <thead><tr>
+        <th class="left">Rango de Edad</th>
+        <th>Hombres</th>
+        <th>Mujeres</th>
+        <th>Embarazadas</th>
+        <th>Migrantes</th>
+      </tr></thead><tbody>`;
+    for (const r of rows){
+      const isTot = r.Rango.startsWith('Total');
+      html += `<tr${isTot?' class="tot"':''}>
+        <td class="left">${r.Rango}</td>
+        <td>${r.Hombres ?? 0}</td>
+        <td>${r.Mujeres ?? 0}</td>
+        <td>${r.Embarazadas ?? 0}</td>
+        <td>${r.Migrantes ?? 0}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+    tableWrap.innerHTML = html;
+  }
+
+  btnDownload.addEventListener('click', ()=>{
+    const table = document.getElementById('tablaClasificacion');
+    if(!table) return;
+    const wb = XLSX.utils.table_to_book(table, { sheet: "Clasificación" });
+    XLSX.writeFile(wb, "clasificacion_por_rangos.xlsx");
+  });
+
+})();
+</script>
+</body>
+</html>
